@@ -7,17 +7,45 @@ const API = process.env.NEXT_PUBLIC_API_URL ?? "";
 
 // ── Token helpers ─────────────────────────────────────────────────
 
+/**
+ * Tokens are stored in two places:
+ *  - localStorage  — read by client-side API calls (apiFetch)
+ *  - document.cookie — read by Next.js middleware for server-side
+ *    route protection (middleware cannot access localStorage)
+ *
+ * The access_token cookie is SameSite=Strict, no HttpOnly (must be
+ * writable from JS). The refresh_token stays in localStorage only —
+ * it is never sent automatically by the browser.
+ */
+
+function setCookie(name: string, value: string, maxAgeSec: number) {
+  if (typeof document === "undefined") return;
+  document.cookie = `${name}=${encodeURIComponent(value)}; path=/; max-age=${maxAgeSec}; SameSite=Strict`;
+}
+
+function deleteCookie(name: string) {
+  if (typeof document === "undefined") return;
+  document.cookie = `${name}=; path=/; max-age=0; SameSite=Strict`;
+}
+
+// Access token expires in 15 min (900 s) — matches backend default.
+// Adjust if JWT_ACCESS_TOKEN_EXPIRE_MINUTES differs in your config.
+const ACCESS_TOKEN_MAX_AGE = 15 * 60;
+
 export const token = {
   get access() { return typeof window !== "undefined" ? localStorage.getItem("access_token") : null; },
   get refresh() { return typeof window !== "undefined" ? localStorage.getItem("refresh_token") : null; },
   set(access: string, refresh: string) {
     localStorage.setItem("access_token", access);
     localStorage.setItem("refresh_token", refresh);
+    // Mirror access token into a cookie for middleware route-guards
+    setCookie("access_token", access, ACCESS_TOKEN_MAX_AGE);
   },
   clear() {
     localStorage.removeItem("access_token");
     localStorage.removeItem("refresh_token");
     localStorage.removeItem("user");
+    deleteCookie("access_token");
   },
 };
 
@@ -38,6 +66,7 @@ async function refreshTokens(): Promise<boolean> {
       });
       if (!res.ok) return false;
       const { access_token, refresh_token } = await res.json();
+      // token.set also refreshes the cookie mirror
       token.set(access_token, refresh_token ?? rt);
       return true;
     } catch {

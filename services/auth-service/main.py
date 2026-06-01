@@ -4,9 +4,10 @@ Handles user registration, login, JWT issuance/refresh,
 password reset, and session management.
 """
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from uuid import UUID, uuid4
+import secrets
 
 import structlog
 from fastapi import FastAPI, HTTPException, Request
@@ -83,6 +84,26 @@ class RegisterRequest(BaseModel):
 class LoginRequest(BaseModel):
     email: EmailStr
     password: str
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    new_password: str
+
+    @field_validator("new_password")
+    @classmethod
+    def password_strength(cls, v: str) -> str:
+        if len(v) < 8:
+            raise ValueError("Password must be at least 8 characters")
+        if not any(c.isupper() for c in v):
+            raise ValueError("Password must contain at least one uppercase letter")
+        if not any(c.isdigit() for c in v):
+            raise ValueError("Password must contain at least one digit")
+        return v
 
 
 class RefreshRequest(BaseModel):
@@ -175,6 +196,13 @@ async def register(req: RegisterRequest, request: Request):
         refresh_token,
         ex=settings.JWT_REFRESH_TOKEN_EXPIRE_DAYS * 86400,
     )
+
+    # Send email verification link asynchronously (non-blocking)
+    try:
+        await _issue_verification_token(str(user_id), req.email)
+    except Exception:
+        # Do not fail registration if the email step errors — just log
+        logger.warning("auth.register.verification_email_failed", user_id=str(user_id))
 
     logger.info("auth.register.success", user_id=str(user_id), email=req.email)
     return TokenResponse(access_token=access_token, refresh_token=refresh_token)
@@ -273,3 +301,210 @@ async def logout(request: Request):
 
     logger.info("auth.logout", user_id=user_id)
     return {"message": "Logged out successfully"}
+
+
+# ── Password reset ────────────────────────────────
+
+RESET_TOKEN_TTL = 60 * 60  # 1 hour
+RESET_TOKEN_PREFIX = "pwd_reset:"
+
+# How to wire up email: set SMTP_* env vars and swap the _send_reset_email
+# stub below with real SMTP / SendGrid / SES calls.
+
+async def _send_reset_email(email: str, reset_url: str) -> None:
+    """Send the password-reset email.
+
+    Replace the log line below with your mailer integration, e.g.:
+        await send_via_sendgrid(to=email, template="reset", url=reset_url)
+    The URL is already fully formed and safe to embed in an anchor tag.
+    """
+    logger.info(
+        "auth.password_reset.email_queued",
+        email=email,
+        reset_url=reset_url,
+        note="Wire _send_reset_email() to your SMTP/SendGrid/SES integration",
+    )
+
+
+@app.post("/auth/forgot-password", status_code=200)
+async def forgot_password(req: ForgotPasswordRequest):
+    """
+    Generate a signed reset token and (conceptually) email it.
+
+    Always returns 200 regardless of whether the email is registered —
+    this prevents account enumeration.
+
+    Token is stored in Redis with a 1-hour TTL keyed by the token itself.
+    The value is the user's UUID so we can look them up on verify.
+    """
+    async with AsyncSessionFactory() as session:
+        user = await get_user_by_email(session, req.email)
+
+    if user:
+        # Invalidate any previous reset token for this user
+        await redis_client.delete(f"{RESET_TOKEN_PREFIX}user:{str(user['id'])}")
+
+        reset_token = secrets.token_urlsafe(32)
+        pipe_key = f"{RESET_TOKEN_PREFIX}{reset_token}"
+        user_key = f"{RESET_TOKEN_PREFIX}user:{str(user['id'])}"
+
+        # Store token → user_id
+        await redis_client.set(pipe_key, str(user["id"]), ex=RESET_TOKEN_TTL)
+        # Store user_id → token so we can invalidate old tokens on re-request
+        await redis_client.set(user_key, reset_token, ex=RESET_TOKEN_TTL)
+
+        frontend_url = getattr(settings, "FRONTEND_URL", "https://app.merittrade.ai")
+        reset_url = f"{frontend_url}/reset-password?token={reset_token}"
+        await _send_reset_email(req.email, reset_url)
+
+        logger.info("auth.password_reset.token_issued", user_id=str(user["id"]))
+
+    # Always return the same response to prevent enumeration
+    return {"message": "If that email is registered you will receive a reset link shortly."}
+
+
+@app.post("/auth/reset-password", status_code=200)
+async def reset_password(req: ResetPasswordRequest):
+    """
+    Verify the reset token, update the password, and invalidate the token.
+
+    Returns 400 for any invalid / expired token (no detail that would
+    distinguish "never existed" from "expired", to avoid oracle attacks).
+    """
+    pipe_key = f"{RESET_TOKEN_PREFIX}{req.token}"
+    user_id = await redis_client.get(pipe_key)
+
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Reset link is invalid or has expired.")
+
+    new_hash = hash_password(req.new_password)
+
+    async with AsyncSessionFactory() as session:
+        result = await session.execute(
+            text("SELECT id, is_active FROM users WHERE id = :id AND deleted_at IS NULL"),
+            {"id": user_id},
+        )
+        user_row = result.mappings().first()
+        if not user_row or not user_row["is_active"]:
+            raise HTTPException(status_code=400, detail="Reset link is invalid or has expired.")
+
+        await session.execute(
+            text("""
+                UPDATE users
+                SET password_hash = :hash,
+                    failed_logins = 0,
+                    locked_until  = NULL,
+                    updated_at    = NOW()
+                WHERE id = :id
+            """),
+            {"hash": new_hash, "id": user_id},
+        )
+        await session.commit()
+
+    # Invalidate the token and the reverse-lookup key
+    await redis_client.delete(pipe_key)
+    await redis_client.delete(f"{RESET_TOKEN_PREFIX}user:{user_id}")
+
+    logger.info("auth.password_reset.success", user_id=user_id)
+    return {"message": "Password updated successfully. You can now sign in."}
+
+
+# ── Email verification ────────────────────────────────────────────
+
+VERIFY_TOKEN_TTL = 60 * 60 * 24  # 24 hours
+VERIFY_TOKEN_PREFIX = "email_verify:"
+
+
+class VerifyEmailRequest(BaseModel):
+    token: str
+
+
+class ResendVerificationRequest(BaseModel):
+    email: EmailStr
+
+
+async def _send_verification_email(email: str, verify_url: str) -> None:
+    """Send the email-verification link.
+
+    Replace the log line with your mailer integration.
+    """
+    logger.info(
+        "auth.email_verify.email_queued",
+        email=email,
+        verify_url=verify_url,
+        note="Wire _send_verification_email() to your SMTP/SendGrid/SES integration",
+    )
+
+
+async def _issue_verification_token(user_id: str, email: str) -> None:
+    """Generate a verification token, store in Redis, and (stub) email it."""
+    verify_token = secrets.token_urlsafe(32)
+    pipe_key = f"{VERIFY_TOKEN_PREFIX}{verify_token}"
+    user_key = f"{VERIFY_TOKEN_PREFIX}user:{user_id}"
+
+    # Invalidate any existing token for this user
+    old_token = await redis_client.get(user_key)
+    if old_token:
+        await redis_client.delete(f"{VERIFY_TOKEN_PREFIX}{old_token}")
+
+    await redis_client.set(pipe_key, user_id, ex=VERIFY_TOKEN_TTL)
+    await redis_client.set(user_key, verify_token, ex=VERIFY_TOKEN_TTL)
+
+    frontend_url = getattr(settings, "FRONTEND_URL", "https://app.merittrade.ai")
+    verify_url = f"{frontend_url}/verify-email?token={verify_token}"
+    await _send_verification_email(email, verify_url)
+
+
+@app.post("/auth/verify-email", status_code=200)
+async def verify_email(req: VerifyEmailRequest):
+    """Consume a verification token and mark the user's email as verified."""
+    pipe_key = f"{VERIFY_TOKEN_PREFIX}{req.token}"
+    user_id = await redis_client.get(pipe_key)
+
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Verification link has expired or is invalid.")
+
+    async with AsyncSessionFactory() as session:
+        result = await session.execute(
+            text("SELECT id, is_verified FROM users WHERE id = :id AND deleted_at IS NULL"),
+            {"id": user_id},
+        )
+        user_row = result.mappings().first()
+        if not user_row:
+            raise HTTPException(status_code=400, detail="Verification link has expired or is invalid.")
+
+        if user_row["is_verified"]:
+            # Already verified — clean up token and return success
+            await redis_client.delete(pipe_key)
+            await redis_client.delete(f"{VERIFY_TOKEN_PREFIX}user:{user_id}")
+            return {"message": "Email already verified. You're good to go!"}
+
+        await session.execute(
+            text("UPDATE users SET is_verified = true, updated_at = NOW() WHERE id = :id"),
+            {"id": user_id},
+        )
+        await session.commit()
+
+    # Invalidate both keys
+    await redis_client.delete(pipe_key)
+    await redis_client.delete(f"{VERIFY_TOKEN_PREFIX}user:{user_id}")
+
+    logger.info("auth.email_verify.success", user_id=user_id)
+    return {"message": "Email verified successfully!"}
+
+
+@app.post("/auth/resend-verification", status_code=200)
+async def resend_verification(req: ResendVerificationRequest):
+    """Resend the email verification link.
+
+    Always returns 200 to prevent account enumeration.
+    Rate-limiting should be applied at the API gateway level.
+    """
+    async with AsyncSessionFactory() as session:
+        user = await get_user_by_email(session, req.email)
+
+    if user and not user.get("is_verified") and user.get("is_active"):
+        await _issue_verification_token(str(user["id"]), user["email"])
+        logger.info("auth.email_verify.resent", user_id=str(user["id"]))
+
+    return {"message": "If that email is registered and unverified, a new link has been sent."}

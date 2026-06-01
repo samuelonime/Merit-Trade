@@ -259,6 +259,9 @@ function ToastContainer({ toasts }: { toasts: Toast[] }) {
 // ── Main Dashboard ────────────────────────────────────────────────
 
 export default function MeritTradeDashboard() {
+  // ── Toast (must be first — used by effects and callbacks below) ──
+  const { toasts, push } = useToast();
+
   const [activeTab, setActiveTab] = useState<"dashboard" | "signals" | "trades" | "risk" | "brokers" | "notifications">("dashboard");
   const [signals, setSignals] = useState<Signal[]>([]);
   const [trades, setTrades] = useState<Trade[]>([]);
@@ -454,6 +457,22 @@ export default function MeritTradeDashboard() {
             <div className="user-avatar" title={user?.email}>
               {user?.username?.slice(0, 2).toUpperCase() || "??"}
             </div>
+            <button
+              className="btn btn-outline btn-sm"
+              title="Sign out"
+              onClick={async () => {
+                await apiFetch("/api/auth/logout", { method: "POST" });
+                localStorage.removeItem("access_token");
+                localStorage.removeItem("refresh_token");
+                localStorage.removeItem("user");
+                // Clear the cookie mirror used by middleware
+                document.cookie = "access_token=; path=/; max-age=0; SameSite=Strict";
+                window.location.href = "/login";
+              }}
+              style={{ padding: "5px 12px", fontSize: 12 }}
+            >
+              Sign out
+            </button>
           </div>
         </header>
 

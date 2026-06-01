@@ -2,8 +2,10 @@ import { NextRequest, NextResponse } from "next/server";
 
 // Routes that require authentication
 const PROTECTED = ["/dashboard"];
-// Routes only for unauthenticated users
-const AUTH_ONLY = ["/login", "/register", "/forgot-password"];
+// Routes only for unauthenticated users (redirect to /dashboard if already logged in)
+const AUTH_ONLY = ["/login", "/register", "/forgot-password", "/reset-password"];
+// Routes accessible to everyone (no redirect either way)
+const PUBLIC_ONLY = ["/verify-email", "/pricing"];
 
 export function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
@@ -30,5 +32,5 @@ export function middleware(req: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/dashboard/:path*", "/login", "/register", "/forgot-password"],
+  matcher: ["/dashboard/:path*", "/login", "/register", "/forgot-password", "/reset-password", "/verify-email", "/pricing"],
 };
