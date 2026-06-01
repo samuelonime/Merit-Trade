@@ -1,0 +1,149 @@
+# docker-compose.prod.yml
+# Usage: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# Overrides for production:
+#   - Remove volume mounts (no live reload)
+#   - Use gunicorn/uvicorn workers instead of --reload
+#   - Restrict port exposure (internal only, Nginx handles TLS)
+#   - Add resource limits
+
+version: "3.9"
+
+services:
+  api-gateway:
+    volumes: []
+    command: >
+      uvicorn main:app
+      --host 0.0.0.0
+      --port 8000
+      --workers 4
+      --no-access-log
+    ports: []
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+
+  auth-service:
+    command: >
+      uvicorn main:app
+      --host 0.0.0.0
+      --port 8001
+      --workers 2
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+
+  user-service:
+    command: >
+      uvicorn main:app
+      --host 0.0.0.0
+      --port 8002
+      --workers 2
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+
+  signal-engine:
+    volumes:
+      - ./ml/models:/app/models:ro
+    command: >
+      uvicorn main:app
+      --host 0.0.0.0
+      --port 8003
+      --workers 2
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+
+  market-data:
+    command: >
+      uvicorn main:app
+      --host 0.0.0.0
+      --port 8004
+      --workers 2
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+
+  execution-engine:
+    command: >
+      uvicorn main:app
+      --host 0.0.0.0
+      --port 8005
+      --workers 2
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+
+  risk-engine:
+    command: >
+      uvicorn main:app
+      --host 0.0.0.0
+      --port 8006
+      --workers 4
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+
+  notification-service:
+    command: >
+      uvicorn main:app
+      --host 0.0.0.0
+      --port 8007
+      --workers 2
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+
+  admin-service:
+    command: >
+      uvicorn main:app
+      --host 0.0.0.0
+      --port 8008
+      --workers 2
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+
+  celery-worker:
+    volumes:
+      - ./ml/models:/app/models:ro
+    command: >
+      celery -A celery_app worker
+      --loglevel=warning
+      --concurrency=4
+      --max-tasks-per-child=1000
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+
+  celery-beat:
+    command: >
+      celery -A celery_app beat
+      --loglevel=warning
+      --scheduler celery.beat.PersistentScheduler
+    deploy:
+      resources:
+        limits:
+          memory: 128m
+
+  # Production: don't expose DB/cache ports externally
+  postgres:
+    ports: []
+
+  redis:
+    ports: []
+
+  rabbitmq:
+    ports:
+      - "15672:15672"   # Keep management UI, restrict via Nginx if needed
