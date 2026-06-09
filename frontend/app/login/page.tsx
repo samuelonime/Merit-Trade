@@ -38,10 +38,10 @@ export default function LoginPage() {
     const { data, error } = await auth.login(form.email, form.password);
     setLoading(false);
 
-    if (error) {
-      if (error.includes("423")) setServerError("Account temporarily locked due to too many failed attempts. Try again in 30 minutes.");
-      else if (error.includes("401")) setServerError("Incorrect email or password.");
-      else setServerError(error);
+    if (error || !data) {
+      if (error?.includes("423")) setServerError("Account temporarily locked due to too many failed attempts. Try again in 30 minutes.");
+      else if (error?.includes("401")) setServerError("Incorrect email or password.");
+      else setServerError(error || "Unexpected server response.");
       return;
     }
 

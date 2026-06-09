@@ -62,9 +62,9 @@ export default function RegisterPage() {
     const { data, error } = await auth.register(form.email, form.username.toLowerCase(), form.password, form.full_name);
     setLoading(false);
 
-    if (error) {
-      if (error.includes("409")) setServerError("That email or username is already registered.");
-      else setServerError(error);
+    if (error || !data) {
+      if (error?.includes("409")) setServerError("That email or username is already registered.");
+      else setServerError(error || "Unexpected server response.");
       return;
     }
 
