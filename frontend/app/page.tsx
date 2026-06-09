@@ -199,6 +199,11 @@ function Hero() {
           <Link href="/register" className="btn btn--hero">Start trading free →</Link>
           <Link href="/dashboard" className="btn btn--outline">View live dashboard</Link>
         </div>
+        <div className="hero__links">
+          <Link href="/ai-reference" className="btn btn--outline">AI Reference</Link>
+          <Link href="/privacy-policy" className="btn btn--ghost">Privacy Policy</Link>
+          <Link href="/terms-of-service" className="btn btn--ghost">Terms of Service</Link>
+        </div>
         <div className="hero__stats">
           <div className="hero__stat">
             <span className="stat-val">{winRate}%</span>
@@ -454,10 +459,9 @@ function Footer() {
           <span className="brand-name">Merit<span>Trade</span> AI</span>
         </div>
         <div className="footer__links">
-          <a href="#">Documentation</a>
-          <a href="#">API Reference</a>
-          <a href="#">Privacy Policy</a>
-          <a href="#">Terms of Service</a>
+          <Link href="/ai-reference">AI Reference</Link>
+          <Link href="/privacy-policy">Privacy Policy</Link>
+          <Link href="/terms-of-service">Terms of Service</Link>
         </div>
         <p className="footer__copy">© {new Date().getFullYear()} Merit-Trade AI. All rights reserved. Proprietary.</p>
       </div>
@@ -518,6 +522,15 @@ export default function LandingPage() {
         .btn--primary:hover { background: #90cdf4; border-color: #90cdf4; }
         .btn--outline { border: 1px solid rgba(99,179,237,0.4); color: #63b3ed; background: transparent; }
         .btn--outline:hover { background: rgba(99,179,237,0.08); }
+        .hero__links {
+          display: flex;
+          flex-wrap: wrap;
+          justify-content: center;
+          gap: 0.85rem;
+          margin: 1rem auto 0;
+          max-width: 560px;
+        }
+        .hero__links .btn { min-width: 150px; justify-content: center; }
         .btn--hero {
           background: #63b3ed; color: #0a1628; border: none;
           padding: 0.9rem 2rem; font-size: 1rem; border-radius: 10px;

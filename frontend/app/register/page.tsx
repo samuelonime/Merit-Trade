@@ -200,7 +200,7 @@ export default function RegisterPage() {
             <label className="agree">
               <input type="checkbox" checked={agreed} onChange={e => setAgreed(e.target.checked)} />
               <span className="agree-text">
-                I agree to the <a href="#" tabIndex={-1}>Terms of Service</a> and <a href="#" tabIndex={-1}>Privacy Policy</a>.
+                I agree to the <Link href="/terms-of-service" tabIndex={-1}>Terms of Service</Link> and <Link href="/privacy-policy" tabIndex={-1}>Privacy Policy</Link>.
                 I understand this platform is not financial advice and trading involves substantial risk.
               </span>
             </label>
