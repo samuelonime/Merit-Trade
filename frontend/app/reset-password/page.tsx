@@ -2,6 +2,7 @@
 
 import { useState, useEffect, Suspense } from "react";
 import Link from "next/link";
+import Logo from "@/components/Logo";
 import { useRouter, useSearchParams } from "next/navigation";
 import { apiFetch } from "@/lib/api";
 
@@ -231,10 +232,7 @@ export default function ResetPasswordPage() {
     <>
       <style>{SHARED_STYLES}</style>
       <div className="page">
-        <div className="logo">
-          <div className="logo-icon">M</div>
-          <div className="logo-text">Merit<span>Trade</span> AI</div>
-        </div>
+        <Logo href="/" />
         {/* Suspense required because useSearchParams() is used inside */}
         <Suspense fallback={<div className="card" style={{ textAlign: "center", padding: "2rem", color: "#4a6a80" }}>Loading…</div>}>
           <ResetForm />

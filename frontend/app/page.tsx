@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from "react";
 import Link from "next/link";
+import Logo from "@/components/Logo";
 
 // ── Animated counter hook ──────────────────────────────────────────
 function useCounter(target: number, duration = 2000, start = false) {
@@ -149,7 +150,7 @@ function Nav() {
     <nav className={`nav${scrolled ? " nav--scrolled" : ""}`}>
       <div className="nav__inner">
         <div className="nav__brand">
-          <span className="brand-icon">◈</span>
+          <Logo href="/" showText={false} size={32} className="brand-icon" />
           <span className="brand-name">Merit<span>Trade</span> AI</span>
         </div>
         <div className="nav__links">
@@ -455,7 +456,7 @@ function Footer() {
     <footer className="footer">
       <div className="footer__inner">
         <div className="footer__brand">
-          <span className="brand-icon">◈</span>
+          <Logo href="/" showText={false} size={24} className="brand-icon" />
           <span className="brand-name">Merit<span>Trade</span> AI</span>
         </div>
         <div className="footer__links">

@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from "react";
 import Link from "next/link";
+import Logo from "@/components/Logo";
 import { useRouter } from "next/navigation";
 import { auth, token } from "@/lib/api";
 
@@ -94,10 +95,7 @@ export default function LoginPage() {
       `}</style>
 
       <div className="page">
-        <div className="logo">
-          <div className="logo-icon">M</div>
-          <div className="logo-text">Merit<span>Trade</span> AI</div>
-        </div>
+        <Logo href="/" />
 
         <div className="card">
           <h1>Welcome back</h1>

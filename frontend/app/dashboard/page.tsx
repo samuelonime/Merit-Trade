@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
+import Logo from "@/components/Logo";
 import {
   AreaChart, Area, BarChart, Bar,
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine,
@@ -411,7 +412,7 @@ export default function MeritTradeDashboard() {
       {/* Sidebar */}
       <aside className="sidebar">
         <div className="brand">
-          <div className="brand-icon">M</div>
+          <Logo href="/" showText={false} size={36} className="brand-icon" />
           <div>
             <div className="brand-name">Merit-Trade</div>
             <div className="brand-sub">AI Trading</div>
