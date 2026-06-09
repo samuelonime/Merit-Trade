@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from "react";
 import Link from "next/link";
+import Logo from "@/components/Logo";
 import { useRouter } from "next/navigation";
 import { auth, token } from "@/lib/api";
 
