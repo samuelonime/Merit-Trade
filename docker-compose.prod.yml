@@ -3,7 +3,7 @@
 #
 # Overrides for production:
 #   - Remove volume mounts (no live reload)
-#   - Use gunicorn/uvicorn workers instead of --reload
+#   - Use uvicorn workers instead of --reload
 #   - Restrict port exposure (internal only, Nginx handles TLS)
 #   - Add resource limits
 
@@ -53,7 +53,7 @@ services:
       uvicorn main:app
       --host 0.0.0.0
       --port 8003
-      --workers 2
+      --workers 1
     deploy:
       resources:
         limits:
@@ -114,36 +114,9 @@ services:
         limits:
           memory: 256m
 
-  celery-worker:
-    volumes:
-      - ./ml/models:/app/models:ro
-    command: >
-      celery -A celery_app worker
-      --loglevel=warning
-      --concurrency=4
-      --max-tasks-per-child=1000
-    deploy:
-      resources:
-        limits:
-          memory: 2g
-
-  celery-beat:
-    command: >
-      celery -A celery_app beat
-      --loglevel=warning
-      --scheduler celery.beat.PersistentScheduler
-    deploy:
-      resources:
-        limits:
-          memory: 128m
-
   # Production: don't expose DB/cache ports externally
   postgres:
     ports: []
 
   redis:
     ports: []
-
-  rabbitmq:
-    ports:
-      - "15672:15672"   # Keep management UI, restrict via Nginx if needed

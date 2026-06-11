@@ -7,7 +7,6 @@ networks:
 volumes:
   postgres_data:
   redis_data:
-  rabbitmq_data:
 
 services:
   # ─────────────────── INFRASTRUCTURE ───────────────────
@@ -47,26 +46,6 @@ services:
       test: ["CMD", "redis-cli", "--no-auth-warning", "-a", "${REDIS_PASSWORD}", "ping"]
       interval: 10s
       timeout: 5s
-      retries: 5
-
-  rabbitmq:
-    image: rabbitmq:3.12-management-alpine
-    container_name: merit-rabbitmq
-    restart: unless-stopped
-    environment:
-      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER}
-      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
-    volumes:
-      - rabbitmq_data:/var/lib/rabbitmq
-    ports:
-      - "5672:5672"
-      - "15672:15672"
-    networks:
-      - merit-net
-    healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "check_port_connectivity"]
-      interval: 15s
-      timeout: 10s
       retries: 5
 
   nginx:
@@ -151,8 +130,6 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      rabbitmq:
-        condition: service_healthy
     networks:
       - merit-net
     volumes:
@@ -219,7 +196,7 @@ services:
     ports:
       - "8007:8007"
     depends_on:
-      rabbitmq:
+      redis:
         condition: service_healthy
     networks:
       - merit-net
@@ -235,39 +212,6 @@ services:
       - "8008:8008"
     depends_on:
       postgres:
-        condition: service_healthy
-    networks:
-      - merit-net
-
-  # ─────────────────── CELERY WORKERS ───────────────────
-  celery-worker:
-    build:
-      context: ./services/signal-engine
-      dockerfile: Dockerfile
-    container_name: merit-celery-worker
-    restart: unless-stopped
-    env_file: .env
-    command: celery -A celery_app worker --loglevel=info --concurrency=4
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    networks:
-      - merit-net
-    volumes:
-      - ./ml/models:/app/models
-
-  celery-beat:
-    build:
-      context: ./services/signal-engine
-      dockerfile: Dockerfile
-    container_name: merit-celery-beat
-    restart: unless-stopped
-    env_file: .env
-    command: celery -A celery_app beat --loglevel=info
-    depends_on:
-      rabbitmq:
         condition: service_healthy
     networks:
       - merit-net
