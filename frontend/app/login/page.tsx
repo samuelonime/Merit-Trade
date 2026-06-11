@@ -45,6 +45,11 @@ export default function LoginPage() {
       return;
     }
 
+    if (!data) {
+      setServerError("Unexpected server response. Please try again.");
+      return;
+    }
+
     token.set(data.access_token, data.refresh_token);
     router.push("/dashboard");
   };
