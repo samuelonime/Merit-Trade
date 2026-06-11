@@ -2,7 +2,6 @@
 
 import { useState, useEffect } from "react";
 import Link from "next/link";
-import Logo from "@/components/Logo";
 import { useRouter } from "next/navigation";
 import { auth, token } from "@/lib/api";
 
@@ -39,10 +38,10 @@ export default function LoginPage() {
     const { data, error } = await auth.login(form.email, form.password);
     setLoading(false);
 
-    if (error || !data) {
-      if (error?.includes("423")) setServerError("Account temporarily locked due to too many failed attempts. Try again in 30 minutes.");
-      else if (error?.includes("401")) setServerError("Incorrect email or password.");
-      else setServerError(error || "Unexpected server response.");
+    if (error) {
+      if (error.includes("423")) setServerError("Account temporarily locked due to too many failed attempts. Try again in 30 minutes.");
+      else if (error.includes("401")) setServerError("Incorrect email or password.");
+      else setServerError(error);
       return;
     }
 
@@ -95,7 +94,10 @@ export default function LoginPage() {
       `}</style>
 
       <div className="page">
-        <Logo href="/" />
+        <div className="logo">
+          <div className="logo-icon">M</div>
+          <div className="logo-text">Merit<span>Trade</span> AI</div>
+        </div>
 
         <div className="card">
           <h1>Welcome back</h1>

@@ -37,6 +37,10 @@ class Settings(BaseSettings):
     # AES
     AES_ENCRYPTION_KEY: str  # must be 32 bytes (base64 encoded)
 
+    # Internal service-to-service auth (used by Celery → signal-engine)
+    # Set to any long random string in .env; keep it out of the API gateway
+    INTERNAL_SERVICE_TOKEN: Optional[str] = None
+
     # Anthropic (strictly limited use)
     ANTHROPIC_API_KEY: str
     ANTHROPIC_MODEL: str = "claude-sonnet-4-20250514"

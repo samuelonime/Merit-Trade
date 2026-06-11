@@ -58,19 +58,20 @@ class FeatureEngineer:
         """
         Compute all features for a given OHLCV DataFrame.
         df must have columns: open, high, low, close, volume
+        Rows must be in chronological order (oldest first).
         """
         df = df.copy()
-        close = df["close"]
-        high = df["high"]
-        low = df["low"]
+        close  = df["close"]
+        high   = df["high"]
+        low    = df["low"]
         volume = df["volume"]
 
         # ── Moving Averages ────────────────────────
-        df["ema_20"] = close.ewm(span=20, adjust=False).mean()
-        df["ema_50"] = close.ewm(span=50, adjust=False).mean()
+        df["ema_20"]  = close.ewm(span=20, adjust=False).mean()
+        df["ema_50"]  = close.ewm(span=50, adjust=False).mean()
         df["ema_200"] = close.ewm(span=200, adjust=False).mean()
-        df["sma_20"] = close.rolling(20).mean()
-        df["sma_50"] = close.rolling(50).mean()
+        df["sma_20"]  = close.rolling(20).mean()
+        df["sma_50"]  = close.rolling(50).mean()
 
         # ── RSI ────────────────────────────────────
         df["rsi_14"] = FeatureEngineer._rsi(close, 14)
@@ -78,9 +79,9 @@ class FeatureEngineer:
         # ── MACD ───────────────────────────────────
         ema_12 = close.ewm(span=12, adjust=False).mean()
         ema_26 = close.ewm(span=26, adjust=False).mean()
-        df["macd_line"] = ema_12 - ema_26
+        df["macd_line"]   = ema_12 - ema_26
         df["macd_signal"] = df["macd_line"].ewm(span=9, adjust=False).mean()
-        df["macd_hist"] = df["macd_line"] - df["macd_signal"]
+        df["macd_hist"]   = df["macd_line"] - df["macd_signal"]
 
         # ── ATR ────────────────────────────────────
         df["atr_14"] = FeatureEngineer._atr(high, low, close, 14)
@@ -92,9 +93,15 @@ class FeatureEngineer:
         df["bb_lower"] = df["bb_middle"] - (2 * bb_std)
         df["bb_width"] = (df["bb_upper"] - df["bb_lower"]) / df["bb_middle"]
 
-        # ── VWAP ───────────────────────────────────
-        typical_price = (high + low + close) / 3
-        df["vwap"] = (typical_price * volume).cumsum() / volume.cumsum()
+        # ── VWAP (rolling 20-period) ────────────────────────────────────────
+        # FIX #4: The original used cumsum() which resets to zero on every ingest
+        # batch, producing wrong values for all but the first daily batch.
+        # Rolling VWAP is stateless across batches and always correct.
+        typical_price  = (high + low + close) / 3
+        df["vwap"] = (
+            (typical_price * volume).rolling(20).sum() /
+            volume.rolling(20).sum()
+        )
 
         # ── Volume SMA ─────────────────────────────
         df["volume_sma_20"] = volume.rolling(20).mean()
@@ -113,9 +120,9 @@ class FeatureEngineer:
     @staticmethod
     def _rsi(close: pd.Series, period: int) -> pd.Series:
         delta = close.diff()
-        gain = delta.where(delta > 0, 0.0).rolling(window=period).mean()
-        loss = -delta.where(delta < 0, 0.0).rolling(window=period).mean()
-        rs = gain / loss.replace(0, np.nan)
+        gain  = delta.where(delta > 0, 0.0).rolling(window=period).mean()
+        loss  = -delta.where(delta < 0, 0.0).rolling(window=period).mean()
+        rs    = gain / loss.replace(0, np.nan)
         return 100 - (100 / (1 + rs))
 
     @staticmethod
@@ -124,7 +131,7 @@ class FeatureEngineer:
         tr = pd.concat([
             high - low,
             (high - prev_close).abs(),
-            (low - prev_close).abs(),
+            (low  - prev_close).abs(),
         ], axis=1).max(axis=1)
         return tr.rolling(period).mean()
 
@@ -132,31 +139,30 @@ class FeatureEngineer:
     def _market_structure(df: pd.DataFrame) -> pd.DataFrame:
         """Identify Higher Highs, Higher Lows, Lower Highs, Lower Lows."""
         highs = df["high"]
-        lows = df["low"]
+        lows  = df["low"]
         structures = []
 
         for i in range(2, len(df)):
             prev_high = highs.iloc[i - 1]
-            prev_low = lows.iloc[i - 1]
+            prev_low  = lows.iloc[i - 1]
             curr_high = highs.iloc[i]
-            curr_low = lows.iloc[i]
+            curr_low  = lows.iloc[i]
 
             if curr_high > prev_high and curr_low > prev_low:
                 structures.append("HH_HL")
             elif curr_high < prev_high and curr_low < prev_low:
                 structures.append("LH_LL")
             elif curr_high > prev_high and curr_low < prev_low:
-                structures.append("HH_LL")  # expansion
+                structures.append("HH_LL")   # expansion
             else:
-                structures.append("LH_HL")  # contraction
+                structures.append("LH_HL")   # contraction
 
         df["structure"] = ["UNKNOWN", "UNKNOWN"] + structures
 
-        # Trend direction from structure
         def get_trend(s):
-            if s in ("HH_HL",):
+            if s == "HH_HL":
                 return "UP"
-            elif s in ("LH_LL",):
+            elif s == "LH_LL":
                 return "DOWN"
             else:
                 return "SIDEWAYS"
@@ -167,7 +173,7 @@ class FeatureEngineer:
     @staticmethod
     def _support_resistance(df: pd.DataFrame, lookback: int = 20) -> pd.DataFrame:
         """Identify recent support and resistance levels."""
-        df["support_level"] = df["low"].rolling(lookback).min()
+        df["support_level"]    = df["low"].rolling(lookback).min()
         df["resistance_level"] = df["high"].rolling(lookback).max()
         return df
 
@@ -176,19 +182,19 @@ class FeatureEngineer:
         """
         Identify Fair Value Gaps (FVG) / imbalances.
         Bullish FVG: candle[i-2].high < candle[i].low
-        Bearish FVG: candle[i-2].low > candle[i].high
+        Bearish FVG: candle[i-2].low  > candle[i].high
         """
         fvg_bullish = []
         fvg_bearish = []
 
         for i in range(2, len(df)):
             bull = df["high"].iloc[i - 2] < df["low"].iloc[i]
-            bear = df["low"].iloc[i - 2] > df["high"].iloc[i]
+            bear = df["low"].iloc[i - 2]  > df["high"].iloc[i]
             fvg_bullish.append(bull)
             fvg_bearish.append(bear)
 
-        df["fvg_bullish"] = [False, False] + fvg_bullish
-        df["fvg_bearish"] = [False, False] + fvg_bearish
+        df["fvg_bullish"]   = [False, False] + fvg_bullish
+        df["fvg_bearish"]   = [False, False] + fvg_bearish
         df["imbalance_zone"] = df["fvg_bullish"] | df["fvg_bearish"]
         return df
 
@@ -209,9 +215,9 @@ async def ingest_candles(payload: dict):
     Ingest OHLCV data and compute features.
     Called by data collectors (scheduled Celery tasks).
     """
-    symbol = payload.get("symbol", "").upper()
+    symbol    = payload.get("symbol", "").upper()
     timeframe = payload.get("timeframe", "1h")
-    candles = payload.get("candles", [])
+    candles   = payload.get("candles", [])
 
     if not candles:
         raise HTTPException(status_code=400, detail="No candles provided")
@@ -228,12 +234,13 @@ async def ingest_candles(payload: dict):
                     INSERT INTO market_data (time, symbol, timeframe, open, high, low, close, volume)
                     VALUES (:t, :s, :tf, :o, :h, :l, :c, :v)
                     ON CONFLICT (time, symbol, timeframe) DO UPDATE
-                    SET open=:o, high=:h, low=:l, close=:c, volume=:v
+                    SET open=EXCLUDED.open, high=EXCLUDED.high, low=EXCLUDED.low,
+                        close=EXCLUDED.close, volume=EXCLUDED.volume
                 """),
                 {
                     "t": row["time"], "s": symbol, "tf": timeframe,
-                    "o": float(row["open"]), "h": float(row["high"]),
-                    "l": float(row["low"]), "c": float(row["close"]),
+                    "o": float(row["open"]),   "h": float(row["high"]),
+                    "l": float(row["low"]),    "c": float(row["close"]),
                     "v": float(row["volume"]),
                 },
             )
@@ -243,48 +250,64 @@ async def ingest_candles(payload: dict):
     df = fe.compute_all(df)
 
     # Store features
-    feature_cols = [
-        "ema_20", "ema_50", "ema_200", "sma_20", "sma_50",
-        "rsi_14", "macd_line", "macd_signal", "macd_hist",
-        "atr_14", "bb_upper", "bb_middle", "bb_lower", "bb_width",
-        "vwap", "volume_sma_20", "structure", "trend_direction",
-        "support_level", "resistance_level", "fvg_bullish", "fvg_bearish",
-        "imbalance_zone",
-    ]
+    # FIX #5: ON CONFLICT now updates ALL feature columns, not just 3.
     async with AsyncSessionFactory() as session:
         for _, row in df.dropna(subset=["ema_20"]).iterrows():
             await session.execute(
                 text("""
-                    INSERT INTO features (time, symbol, timeframe, ema_20, ema_50, ema_200,
-                        sma_20, sma_50, rsi_14, macd_line, macd_signal, macd_hist,
+                    INSERT INTO features (
+                        time, symbol, timeframe,
+                        ema_20, ema_50, ema_200, sma_20, sma_50,
+                        rsi_14, macd_line, macd_signal, macd_hist,
                         atr_14, bb_upper, bb_middle, bb_lower, bb_width,
-                        vwap, volume_sma_20, structure, trend_direction,
-                        support_level, resistance_level, fvg_bullish, fvg_bearish, imbalance_zone)
-                    VALUES (:t, :s, :tf, :ema20, :ema50, :ema200,
-                        :sma20, :sma50, :rsi, :macd_l, :macd_s, :macd_h,
+                        vwap, volume_sma_20,
+                        structure, trend_direction,
+                        support_level, resistance_level,
+                        fvg_bullish, fvg_bearish, imbalance_zone
+                    ) VALUES (
+                        :t, :s, :tf,
+                        :ema20, :ema50, :ema200, :sma20, :sma50,
+                        :rsi, :macd_l, :macd_s, :macd_h,
                         :atr, :bb_u, :bb_m, :bb_l, :bb_w,
-                        :vwap, :vol_sma, :struct, :trend,
-                        :sup, :res, :fvg_b, :fvg_br, :imbalance)
-                    ON CONFLICT (time, symbol, timeframe) DO UPDATE
-                    SET ema_20=:ema20, rsi_14=:rsi, atr_14=:atr
+                        :vwap, :vol_sma,
+                        :struct, :trend,
+                        :sup, :res,
+                        :fvg_b, :fvg_br, :imbalance
+                    )
+                    ON CONFLICT (time, symbol, timeframe) DO UPDATE SET
+                        ema_20=EXCLUDED.ema_20,           ema_50=EXCLUDED.ema_50,
+                        ema_200=EXCLUDED.ema_200,         sma_20=EXCLUDED.sma_20,
+                        sma_50=EXCLUDED.sma_50,           rsi_14=EXCLUDED.rsi_14,
+                        macd_line=EXCLUDED.macd_line,     macd_signal=EXCLUDED.macd_signal,
+                        macd_hist=EXCLUDED.macd_hist,     atr_14=EXCLUDED.atr_14,
+                        bb_upper=EXCLUDED.bb_upper,       bb_middle=EXCLUDED.bb_middle,
+                        bb_lower=EXCLUDED.bb_lower,       bb_width=EXCLUDED.bb_width,
+                        vwap=EXCLUDED.vwap,               volume_sma_20=EXCLUDED.volume_sma_20,
+                        structure=EXCLUDED.structure,     trend_direction=EXCLUDED.trend_direction,
+                        support_level=EXCLUDED.support_level,
+                        resistance_level=EXCLUDED.resistance_level,
+                        fvg_bullish=EXCLUDED.fvg_bullish,
+                        fvg_bearish=EXCLUDED.fvg_bearish,
+                        imbalance_zone=EXCLUDED.imbalance_zone
                 """),
                 {
                     "t": row["time"], "s": symbol, "tf": timeframe,
-                    "ema20": _safe(row, "ema_20"), "ema50": _safe(row, "ema_50"),
+                    "ema20":  _safe(row, "ema_20"),   "ema50":  _safe(row, "ema_50"),
                     "ema200": _safe(row, "ema_200"),
-                    "sma20": _safe(row, "sma_20"), "sma50": _safe(row, "sma_50"),
-                    "rsi": _safe(row, "rsi_14"),
+                    "sma20":  _safe(row, "sma_20"),   "sma50":  _safe(row, "sma_50"),
+                    "rsi":    _safe(row, "rsi_14"),
                     "macd_l": _safe(row, "macd_line"), "macd_s": _safe(row, "macd_signal"),
                     "macd_h": _safe(row, "macd_hist"),
-                    "atr": _safe(row, "atr_14"),
-                    "bb_u": _safe(row, "bb_upper"), "bb_m": _safe(row, "bb_middle"),
-                    "bb_l": _safe(row, "bb_lower"), "bb_w": _safe(row, "bb_width"),
-                    "vwap": _safe(row, "vwap"), "vol_sma": _safe(row, "volume_sma_20"),
-                    "struct": row.get("structure", "UNKNOWN"),
-                    "trend": row.get("trend_direction", "SIDEWAYS"),
-                    "sup": _safe(row, "support_level"), "res": _safe(row, "resistance_level"),
-                    "fvg_b": bool(row.get("fvg_bullish", False)),
-                    "fvg_br": bool(row.get("fvg_bearish", False)),
+                    "atr":    _safe(row, "atr_14"),
+                    "bb_u":   _safe(row, "bb_upper"),  "bb_m":   _safe(row, "bb_middle"),
+                    "bb_l":   _safe(row, "bb_lower"),  "bb_w":   _safe(row, "bb_width"),
+                    "vwap":   _safe(row, "vwap"),      "vol_sma": _safe(row, "volume_sma_20"),
+                    "struct": row.get("structure",       "UNKNOWN"),
+                    "trend":  row.get("trend_direction", "SIDEWAYS"),
+                    "sup":    _safe(row, "support_level"),
+                    "res":    _safe(row, "resistance_level"),
+                    "fvg_b":  bool(row.get("fvg_bullish",    False)),
+                    "fvg_br": bool(row.get("fvg_bearish",    False)),
                     "imbalance": bool(row.get("imbalance_zone", False)),
                 },
             )

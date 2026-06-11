@@ -2,7 +2,6 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import Logo from "@/components/Logo";
 import { token } from "@/lib/api";
 
 const STYLES = `
@@ -182,7 +181,10 @@ export default function PricingPage() {
 
       {/* Nav */}
       <nav className="nav">
-        <Logo href="/" />
+        <Link href="/" className="logo">
+          <div className="logo-icon">M</div>
+          <div className="logo-text">Merit<span>Trade</span> AI</div>
+        </Link>
         <div className="nav-links">
           {isLoggedIn
             ? <Link href="/dashboard" className="btn btn-primary">Dashboard</Link>

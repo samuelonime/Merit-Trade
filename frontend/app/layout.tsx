@@ -4,9 +4,6 @@ export const metadata: Metadata = {
   title: "Merit-Trade AI — Professional AI Trading Platform",
   description: "Production-grade AI trading platform with XGBoost, LSTM, and Transformer ensemble models.",
   keywords: ["trading", "AI", "signals", "forex", "crypto", "XGBoost", "LSTM"],
-  icons: {
-    icon: "/favicon.ico",
-  },
   openGraph: {
     title: "Merit-Trade AI",
     description: "AI-powered trading signals with institutional-grade risk management",
@@ -21,7 +18,6 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
         <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
-        <link rel="icon" href="/favicon.ico" />
         {/* Sync localStorage token → cookie so Next.js middleware can read it */}
         <script dangerouslySetInnerHTML={{ __html: `
           (function(){

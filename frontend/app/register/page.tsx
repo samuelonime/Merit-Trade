@@ -2,7 +2,6 @@
 
 import { useState, useEffect } from "react";
 import Link from "next/link";
-import Logo from "@/components/Logo";
 import { useRouter } from "next/navigation";
 import { auth, token } from "@/lib/api";
 
@@ -63,9 +62,9 @@ export default function RegisterPage() {
     const { data, error } = await auth.register(form.email, form.username.toLowerCase(), form.password, form.full_name);
     setLoading(false);
 
-    if (error || !data) {
-      if (error?.includes("409")) setServerError("That email or username is already registered.");
-      else setServerError(error || "Unexpected server response.");
+    if (error) {
+      if (error.includes("409")) setServerError("That email or username is already registered.");
+      else setServerError(error);
       return;
     }
 
@@ -122,7 +121,10 @@ export default function RegisterPage() {
       `}</style>
 
       <div className="page">
-        <Logo href="/" />
+        <div className="logo">
+          <div className="logo-icon">M</div>
+          <div className="logo-text">Merit<span>Trade</span> AI</div>
+        </div>
 
         <div className="card">
           <h1>Create your account</h1>
@@ -198,7 +200,7 @@ export default function RegisterPage() {
             <label className="agree">
               <input type="checkbox" checked={agreed} onChange={e => setAgreed(e.target.checked)} />
               <span className="agree-text">
-                I agree to the <Link href="/terms-of-service" tabIndex={-1}>Terms of Service</Link> and <Link href="/privacy-policy" tabIndex={-1}>Privacy Policy</Link>.
+                I agree to the <a href="#" tabIndex={-1}>Terms of Service</a> and <a href="#" tabIndex={-1}>Privacy Policy</a>.
                 I understand this platform is not financial advice and trading involves substantial risk.
               </span>
             </label>

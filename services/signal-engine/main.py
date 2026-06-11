@@ -9,10 +9,10 @@ Orchestrates the full ML pipeline:
 """
 import asyncio
 import json
+import os
 import pickle
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from enum import Enum
 from typing import Dict, List, Optional
 from uuid import UUID, uuid4
 
@@ -21,8 +21,9 @@ import httpx
 import numpy as np
 import structlog
 import torch
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
@@ -35,6 +36,10 @@ from core.config import settings
 from core.redis_client import RedisClient
 
 logger = structlog.get_logger()
+
+# ── Shared sequence-length constants (must match train_models.py) ──
+LSTM_SEQ_LEN        = 30
+TRANSFORMER_SEQ_LEN = 20
 
 engine = create_async_engine(settings.DATABASE_URL, pool_size=5)
 AsyncSessionFactory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
@@ -62,7 +67,6 @@ def _load_models():
     """Load pre-trained ML models from disk."""
     global xgb_model, lstm_model, transformer_model, feature_scaler
     import xgboost as xgb
-    import os
 
     try:
         if os.path.exists(settings.MODEL_XGBOOST_PATH):
@@ -101,6 +105,33 @@ app = FastAPI(title="Signal Engine", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 
+# ── Internal auth guard ────────────────────────────
+# All routes require either a valid internal token (service-to-service)
+# or the X-User-Plan / X-User-ID headers forwarded by the API gateway.
+# Direct external access without these headers is rejected.
+
+async def require_internal_or_gateway(
+    x_internal_token: Optional[str] = Header(None),
+    x_user_id: Optional[str] = Header(None),
+    x_user_plan: Optional[str] = Header(None),
+):
+    """
+    Defence-in-depth: reject requests that bypass the API gateway.
+    Accepts either:
+      - X-Internal-Token matching settings.INTERNAL_SERVICE_TOKEN (service calls)
+      - X-User-ID + X-User-Plan headers injected by the gateway (user calls)
+    """
+    internal_token = getattr(settings, "INTERNAL_SERVICE_TOKEN", None)
+    if internal_token and x_internal_token == internal_token:
+        return {"source": "internal", "plan": "enterprise"}
+    if x_user_id and x_user_plan:
+        return {"source": "gateway", "user_id": x_user_id, "plan": x_user_plan}
+    raise HTTPException(
+        status_code=403,
+        detail="Direct access to signal-engine is not permitted. Route requests via the API gateway.",
+    )
+
+
 # ── Feature names (must match training data) ───────
 
 FEATURE_COLUMNS = [
@@ -112,8 +143,8 @@ FEATURE_COLUMNS = [
 ]
 
 # Ensemble weights (must sum to 1.0)
-XGBOOST_WEIGHT = 0.4
-LSTM_WEIGHT = 0.3
+XGBOOST_WEIGHT    = 0.4
+LSTM_WEIGHT       = 0.3
 TRANSFORMER_WEIGHT = 0.3
 
 
@@ -171,7 +202,7 @@ class MLPipeline:
 
         probs = xgb_model.predict_proba(features.reshape(1, -1))[0]
         # Assume classes: 0=SELL, 1=HOLD, 2=BUY
-        direction_idx = np.argmax(probs)
+        direction_idx = int(np.argmax(probs))
         direction_map = {0: "SELL", 1: "HOLD", 2: "BUY"}
         return ModelOutput(
             direction=direction_map[direction_idx],
@@ -180,14 +211,18 @@ class MLPipeline:
         )
 
     def run_lstm(self, sequence: np.ndarray) -> ModelOutput:
+        """
+        sequence shape: (LSTM_SEQ_LEN, 5) in chronological order (oldest first).
+        """
         if lstm_model is None:
+            # Pass the last (most recent) row of the raw sequence as features
             return self._fallback_model("LSTM", sequence[-1])
 
         with torch.no_grad():
-            tensor = torch.FloatTensor(sequence).unsqueeze(0)
+            tensor = torch.FloatTensor(sequence).unsqueeze(0)   # (1, seq, features)
             output = lstm_model(tensor)
             probs = torch.softmax(output, dim=-1).numpy()[0]
-        direction_idx = np.argmax(probs)
+        direction_idx = int(np.argmax(probs))
         direction_map = {0: "SELL", 1: "HOLD", 2: "BUY"}
         return ModelOutput(
             direction=direction_map[direction_idx],
@@ -196,30 +231,48 @@ class MLPipeline:
         )
 
     def run_transformer(self, multi_tf_features: np.ndarray) -> ModelOutput:
+        """
+        multi_tf_features shape: (TRANSFORMER_SEQ_LEN, len(FEATURE_COLUMNS))
+        in chronological order (oldest first).
+        """
         if transformer_model is None:
             return self._fallback_model("Transformer", multi_tf_features[-1])
 
         with torch.no_grad():
-            tensor = torch.FloatTensor(multi_tf_features).unsqueeze(0)
+            tensor = torch.FloatTensor(multi_tf_features).unsqueeze(0)  # (1, seq, features)
             output = transformer_model(tensor)
             probs = torch.softmax(output["logits"], dim=-1).numpy()[0]
-        direction_idx = np.argmax(probs)
+
+        direction_idx = int(np.argmax(probs))
         direction_map = {0: "SELL", 1: "HOLD", 2: "BUY"}
+
+        # FIX #3: confidence head returns a Tensor; extract scalar safely
+        raw_conf = output.get("confidence", None)
+        if raw_conf is not None and isinstance(raw_conf, torch.Tensor):
+            confidence_val = float(raw_conf.item())
+        elif raw_conf is not None:
+            confidence_val = float(raw_conf)
+        else:
+            confidence_val = float(max(probs))
+
         return ModelOutput(
             direction=direction_map[direction_idx],
             score=float(probs[direction_idx]),
-            confidence=float(output.get("confidence", max(probs))),
+            confidence=confidence_val,
         )
 
-    def _fallback_model(self, name: str, features: np.ndarray) -> ModelOutput:
+    def _fallback_model(self, name: str, raw_features: np.ndarray) -> ModelOutput:
         """
         Deterministic fallback when model file is not loaded.
-        Uses simple rule-based logic from features.
+        Uses simple rule-based logic from RAW (unscaled) features.
         NOT for production — models must be trained and loaded.
+
+        FIX #8: this method must receive the raw (pre-scale) feature vector,
+        NOT the scaled one, so that RSI index [5] is still in the 0-100 range.
+        The caller is responsible for passing raw_features before scaling.
         """
         logger.warning("ml.model.fallback", model=name)
-        # RSI-based fallback rule
-        rsi = features[5] if len(features) > 5 else 50.0
+        rsi = float(raw_features[5]) if len(raw_features) > 5 else 50.0
         if rsi < 30:
             direction, score = "BUY", 0.60
         elif rsi > 70:
@@ -230,24 +283,24 @@ class MLPipeline:
 
     def compute_ensemble(
         self, xgb_out: ModelOutput, lstm_out: ModelOutput, tf_out: ModelOutput
-    ) -> tuple[str, float]:
+    ) -> tuple[str, float, int]:
         """
         Weighted ensemble: 0.4*XGB + 0.3*LSTM + 0.3*Transformer
         Converts directions to numeric scores, computes weighted average.
+        Returns (direction, ensemble_score, confidence_int).
         """
         direction_score = {"BUY": 1.0, "HOLD": 0.0, "SELL": -1.0}
 
-        xgb_val = direction_score[xgb_out.direction] * xgb_out.score
+        xgb_val  = direction_score[xgb_out.direction]  * xgb_out.score
         lstm_val = direction_score[lstm_out.direction] * lstm_out.score
-        tf_val = direction_score[tf_out.direction] * tf_out.score
+        tf_val   = direction_score[tf_out.direction]   * tf_out.score
 
         ensemble = (
-            XGBOOST_WEIGHT * xgb_val +
-            LSTM_WEIGHT * lstm_val +
+            XGBOOST_WEIGHT     * xgb_val +
+            LSTM_WEIGHT        * lstm_val +
             TRANSFORMER_WEIGHT * tf_val
         )
 
-        # Convert ensemble score to direction + confidence
         if ensemble > 0.3:
             direction = "BUY"
         elif ensemble < -0.3:
@@ -287,7 +340,7 @@ Signal Data (generated by ML models - DO NOT modify the trading direction):
 - EMA50: {features.get('ema_50', 'N/A')}
 - Recent news context: {news_context or 'None available'}
 
-Task: Write a concise 2-3 sentence explanation of WHY the ML models may have generated this signal based on the technical indicators. 
+Task: Write a concise 2-3 sentence explanation of WHY the ML models may have generated this signal based on the technical indicators.
 Also classify the overall market sentiment as: bullish, bearish, or neutral.
 Format: JSON with keys "explanation" (string), "sentiment" (string), "sentiment_score" (float -1.0 to 1.0)
 Respond ONLY with valid JSON, no markdown."""
@@ -314,20 +367,20 @@ Respond ONLY with valid JSON, no markdown."""
 
 def calculate_sl_tp(direction: str, entry: float, atr: float) -> tuple[float, float, float]:
     """ATR-based stop loss and take profit calculation."""
-    sl_multiplier = 1.5
+    sl_multiplier  = 1.5
     tp1_multiplier = 2.0
     tp2_multiplier = 3.5
 
     if direction == "BUY":
-        stop_loss = entry - (atr * sl_multiplier)
+        stop_loss     = entry - (atr * sl_multiplier)
         take_profit_1 = entry + (atr * tp1_multiplier)
         take_profit_2 = entry + (atr * tp2_multiplier)
     elif direction == "SELL":
-        stop_loss = entry + (atr * sl_multiplier)
+        stop_loss     = entry + (atr * sl_multiplier)
         take_profit_1 = entry - (atr * tp1_multiplier)
         take_profit_2 = entry - (atr * tp2_multiplier)
     else:
-        stop_loss = entry - atr
+        stop_loss     = entry - atr
         take_profit_1 = entry + atr
         take_profit_2 = entry + (atr * 2)
 
@@ -339,7 +392,10 @@ def calculate_sl_tp(direction: str, entry: float, atr: float) -> tuple[float, fl
 ml_pipeline = MLPipeline()
 
 
-async def fetch_latest_features(symbol: str, timeframe: str) -> dict:
+async def fetch_latest_features(symbol: str, timeframe: str) -> list:
+    # FIX #9 / #12: fetch enough rows for the largest consumer (LSTM = 30).
+    # Transformer uses TRANSFORMER_SEQ_LEN rows.  We cap at max(LSTM, TRANSFORMER).
+    fetch_limit = max(LSTM_SEQ_LEN, TRANSFORMER_SEQ_LEN)
     async with AsyncSessionFactory() as session:
         result = await session.execute(
             text("""
@@ -348,9 +404,9 @@ async def fetch_latest_features(symbol: str, timeframe: str) -> dict:
                 JOIN market_data m ON f.time = m.time AND f.symbol = m.symbol AND f.timeframe = m.timeframe
                 WHERE f.symbol = :symbol AND f.timeframe = :tf
                 ORDER BY f.time DESC
-                LIMIT 60
+                LIMIT :limit
             """),
-            {"symbol": symbol, "tf": timeframe},
+            {"symbol": symbol, "tf": timeframe, "limit": fetch_limit},
         )
         rows = result.mappings().all()
         if not rows:
@@ -359,51 +415,72 @@ async def fetch_latest_features(symbol: str, timeframe: str) -> dict:
 
 
 async def generate_signal(symbol: str, timeframe: str, asset_class: str) -> SignalResponse:
-    # 1. Fetch features
+    # 1. Fetch features (returned newest-first from DB)
     feature_rows = await fetch_latest_features(symbol, timeframe)
-    latest = feature_rows[0]
+    latest = feature_rows[0]   # most recent candle
 
-    # 2. Build feature vector for XGBoost
-    feature_vec = np.array([float(latest.get(col, 0) or 0) for col in FEATURE_COLUMNS])
+    # 2. Build RAW (unscaled) feature vector for XGBoost — keep a copy for fallback
+    raw_feature_vec = np.array([float(latest.get(col, 0) or 0) for col in FEATURE_COLUMNS])
+
+    # 3. Scale for XGBoost (and Transformer)
+    feature_vec = raw_feature_vec.copy()
     if feature_scaler:
         feature_vec = feature_scaler.transform(feature_vec.reshape(1, -1))[0]
 
-    # 3. Build sequence for LSTM (last 30 candles)
+    # 4. Build LSTM sequence — FIX #9: DB returns DESC; reverse to chronological (oldest first)
+    ohlcv_rows = feature_rows[:LSTM_SEQ_LEN]
     sequence = np.array([[
-        float(row.get("open", 0) or 0),
-        float(row.get("high", 0) or 0),
-        float(row.get("low", 0) or 0),
-        float(row.get("close", 0) or 0),
+        float(row.get("open",   0) or 0),
+        float(row.get("high",   0) or 0),
+        float(row.get("low",    0) or 0),
+        float(row.get("close",  0) or 0),
         float(row.get("volume", 0) or 0),
-    ] for row in feature_rows[:30]])
+    ] for row in ohlcv_rows])
+    sequence = sequence[::-1].copy()   # chronological order (oldest → newest)
 
-    # 4. Build multi-TF features for Transformer
-    # In production this would include 4h + daily features
-    multi_tf = np.array([[float(row.get(col, 0) or 0) for col in FEATURE_COLUMNS] for row in feature_rows[:20]])
+    # 5. Build Transformer sequence — also in chronological order
+    tf_rows = feature_rows[:TRANSFORMER_SEQ_LEN]
+    multi_tf = np.array([
+        [float(row.get(col, 0) or 0) for col in FEATURE_COLUMNS]
+        for row in tf_rows
+    ])
+    multi_tf = multi_tf[::-1].copy()   # chronological order
+    if feature_scaler:
+        orig_shape = multi_tf.shape
+        multi_tf = feature_scaler.transform(multi_tf.reshape(-1, orig_shape[-1])).reshape(orig_shape)
 
-    # 5. Run models
-    xgb_out = ml_pipeline.run_xgboost(feature_vec)
+    # 6. Run models — pass raw_feature_vec to fallback so RSI index is unscaled
+    xgb_out  = ml_pipeline.run_xgboost(feature_vec)
+    if xgb_model is None:
+        xgb_out = ml_pipeline._fallback_model("XGBoost", raw_feature_vec)
+
     lstm_out = ml_pipeline.run_lstm(sequence)
-    tf_out = ml_pipeline.run_transformer(multi_tf)
+    if lstm_model is None:
+        lstm_out = ml_pipeline._fallback_model("LSTM", raw_feature_vec)
 
-    # 6. Ensemble
+    tf_out = ml_pipeline.run_transformer(multi_tf)
+    if transformer_model is None:
+        tf_out = ml_pipeline._fallback_model("Transformer", raw_feature_vec)
+
+    # 7. Ensemble
     direction, ensemble_score, confidence = ml_pipeline.compute_ensemble(xgb_out, lstm_out, tf_out)
 
     # Only generate BUY/SELL signals with meaningful confidence
+    # FIX #1: return a proper 204 Response (no body) — not HTTPException which adds a body
     if direction == "HOLD" or confidence < settings.MIN_CONFIDENCE_THRESHOLD:
-        raise HTTPException(status_code=204, detail="No signal: insufficient confidence or HOLD condition")
+        return Response(status_code=204)
 
-    # 7. ATR-based SL/TP
+    # 8. ATR-based SL/TP
     entry = float(latest.get("close", 0))
-    atr = float(latest.get("atr_14", 0) or entry * 0.001)  # fallback to 0.1% if no ATR
+    atr   = float(latest.get("atr_14", 0) or entry * 0.001)  # fallback to 0.1% if no ATR
     sl, tp1, tp2 = calculate_sl_tp(direction, entry, atr)
 
     rr_ratio = abs(tp1 - entry) / abs(sl - entry) if abs(sl - entry) > 0 else 0
 
-    # 8. Risk score (inverse of confidence, plus spread/volatility factors)
+    # 9. Risk score
     risk_score = max(0, min(100, 100 - confidence + int(atr / entry * 10000)))
 
-    # 9. AI explanation (ONLY for human-readable context, not decision making)
+    # 10. AI explanation (ONLY for human-readable context, not decision making)
     features_for_ai = {col: float(latest.get(col, 0) or 0) for col in FEATURE_COLUMNS[:10]}
     news_context = await redis_client.get(f"news:latest:{symbol[:6].upper()}")
     if news_context:
@@ -412,7 +489,7 @@ async def generate_signal(symbol: str, timeframe: str, asset_class: str) -> Sign
         symbol, direction, confidence, features_for_ai, news_context or ""
     )
 
-    # 10. Persist signal
+    # 11. Persist signal
     signal_id = uuid4()
     async with AsyncSessionFactory() as session:
         await session.execute(
@@ -452,7 +529,7 @@ async def generate_signal(symbol: str, timeframe: str, asset_class: str) -> Sign
         )
         await session.commit()
 
-    # 11. Publish to Redis pub/sub for real-time clients
+    # 12. Publish to Redis pub/sub for real-time clients
     await redis_client.publish(
         "channel:signals",
         json.dumps({
@@ -506,15 +583,19 @@ async def health():
         "status": "ok",
         "service": "signal-engine",
         "models": {
-            "xgboost": xgb_model is not None,
-            "lstm": lstm_model is not None,
+            "xgboost":     xgb_model is not None,
+            "lstm":        lstm_model is not None,
             "transformer": transformer_model is not None,
         },
     }
 
 
-@app.post("/signals/generate", response_model=SignalResponse)
-async def generate(req: SignalRequest):
+@app.post("/signals/generate")
+async def generate(
+    req: SignalRequest,
+    _auth: dict = Depends(require_internal_or_gateway),
+):
+    # FIX #1: generate_signal may return a plain Response(204) — pass it through
     return await generate_signal(req.symbol, req.timeframe, req.asset_class)
 
 
@@ -523,6 +604,7 @@ async def list_signals(
     symbol: Optional[str] = None,
     limit: int = 20,
     offset: int = 0,
+    _auth: dict = Depends(require_internal_or_gateway),
 ):
     async with AsyncSessionFactory() as session:
         where = "WHERE is_active = true"
@@ -539,7 +621,10 @@ async def list_signals(
 
 
 @app.get("/signals/{signal_id}")
-async def get_signal(signal_id: UUID):
+async def get_signal(
+    signal_id: UUID,
+    _auth: dict = Depends(require_internal_or_gateway),
+):
     async with AsyncSessionFactory() as session:
         result = await session.execute(
             text("SELECT * FROM signals WHERE id = :id"),

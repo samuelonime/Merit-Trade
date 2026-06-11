@@ -70,9 +70,13 @@ CRYPTO_SYMBOLS = {"BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"}
 app.conf.beat_schedule = {
 
     # ── 15-minute data & signals ──────────────────
+    # FIX #6: Use crontab(minute="0,15,30,45") so collection is always pinned
+    # to bar-close times, regardless of when the worker was started.
+    # The old schedule: 900.0 fired 900s after the worker last ran, causing
+    # drift that made the signal generator run before fresh data arrived.
     "collect-15m-data": {
         "task": "celery_app.collect_market_data",
-        "schedule": 900.0,   # every 15 minutes
+        "schedule": crontab(minute="0,15,30,45"),
         "args": (ALL_PAIRS, "15m"),
     },
     "generate-signals-15m": {
@@ -148,6 +152,29 @@ def run_async(coro):
         loop.close()
 
 
+# ── Shared DB engine for Celery tasks ─────────────────────────────
+# FIX #14: Use a single module-level engine per worker process instead of
+# creating a new engine on every task invocation. Creating engines is
+# expensive and can exhaust Postgres connection slots under load.
+# Each task still opens its own short-lived AsyncSession.
+
+def _get_celery_db():
+    """Lazily create and return a shared async engine for this worker process."""
+    from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+    from sqlalchemy.orm import sessionmaker
+
+    if not hasattr(_get_celery_db, "_engine"):
+        _get_celery_db._engine = create_async_engine(
+            settings.DATABASE_URL,
+            pool_size=3,
+            max_overflow=5,
+        )
+        _get_celery_db._Session = sessionmaker(
+            _get_celery_db._engine, class_=AsyncSession, expire_on_commit=False
+        )
+    return _get_celery_db._engine, _get_celery_db._Session
+
+
 # ── Market data collection ────────────────────────────────────────
 
 @app.task(bind=True, max_retries=3, default_retry_delay=30)
@@ -194,8 +221,6 @@ async def fetch_ohlcv_from_provider(client: httpx.AsyncClient, symbol: str, time
 
     else:
         # Forex + XAUUSD via Twelve Data
-        # Set TWELVE_DATA_API_KEY in your .env file
-        # Free tier: 800 requests/day — enough for 8 pairs × 4 timeframes
         api_key = getattr(settings, "TWELVE_DATA_API_KEY", None)
         if not api_key:
             logger.warning("celery.twelve_data_key_missing", symbol=symbol)
@@ -246,7 +271,9 @@ async def fetch_ohlcv_from_provider(client: httpx.AsyncClient, symbol: str, time
 def generate_signals_batch(self, symbols: list, timeframe: str):
     """Generate signals for all symbols on a given timeframe."""
     async def _run():
-        async with httpx.AsyncClient(timeout=60) as client:
+        internal_token = getattr(settings, "INTERNAL_SERVICE_TOKEN", "")
+        headers = {"X-Internal-Token": internal_token} if internal_token else {}
+        async with httpx.AsyncClient(timeout=60, headers=headers) as client:
             for symbol in symbols:
                 try:
                     resp = await client.post(
@@ -277,19 +304,13 @@ def generate_signals_batch(self, symbols: list, timeframe: str):
 def expire_free_trials():
     """
     Downgrade free users whose 7-day trial has expired to a locked state.
-    Sets plan to 'expired_free' and is_active=False on signals access.
-    Runs every hour.
+    Sets plan to 'expired_free'. Runs every hour.
     """
     async def _run():
-        from sqlalchemy import text
-        from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-        from sqlalchemy.orm import sessionmaker
-
-        db_engine = create_async_engine(settings.DATABASE_URL)
-        Session = sessionmaker(db_engine, class_=AsyncSession, expire_on_commit=False)
+        # FIX #14: use shared engine instead of creating a new one per call
+        _, Session = _get_celery_db()
 
         async with Session() as session:
-            # Find free users whose trial has expired (created > 7 days ago, no active paid subscription)
             result = await session.execute(text("""
                 UPDATE users
                 SET plan = 'expired_free', updated_at = NOW()
@@ -306,9 +327,9 @@ def expire_free_trials():
             await session.commit()
 
             if expired:
-                logger.info("celery.trials_expired", count=len(expired), users=[str(u["id"]) for u in expired])
+                logger.info("celery.trials_expired", count=len(expired),
+                            users=[str(u["id"]) for u in expired])
 
-                # Send expiry notification to each expired user
                 async with httpx.AsyncClient(timeout=15) as client:
                     for user in expired:
                         try:
@@ -326,9 +347,8 @@ def expire_free_trials():
                                 },
                             )
                         except Exception as e:
-                            logger.error("celery.trial_notify_failed", user_id=str(user["id"]), error=str(e))
-
-        await db_engine.dispose()
+                            logger.error("celery.trial_notify_failed",
+                                         user_id=str(user["id"]), error=str(e))
 
     run_async(_run())
 
@@ -337,23 +357,72 @@ def expire_free_trials():
 
 @app.task
 def collect_economic_calendar():
-    """Fetch high-impact economic events and cache in Redis for risk engine."""
+    """
+    Fetch high-impact economic events and cache in Redis for risk engine.
+
+    FIX #10: Was a stub (events = []) — now fetches from ForexFactory's
+    public JSON feed. High-impact events are cached per currency so the
+    risk engine's news filter actually fires.
+
+    ForexFactory feed: https://nfs.faireconomy.media/ff_calendar_thisweek.json
+    Returns events with fields: title, country, date, time, impact, forecast, previous
+    """
     async def _run():
         from core.redis_client import RedisClient
+        from datetime import datetime, timezone, timedelta
+
         redis = await RedisClient.create()
 
-        # Integrate with ForexFactory, Investing.com, or Nasdaq Data Link
-        # Structure: {currency, title, impact, time}
-        events = []  # Replace with real API call
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.get(
+                    "https://nfs.faireconomy.media/ff_calendar_thisweek.json",
+                    headers={"Accept": "application/json"},
+                )
+                if resp.status_code != 200:
+                    logger.warning("celery.calendar_fetch_failed", status=resp.status_code)
+                    await redis.close()
+                    return
 
-        for event in events:
-            if event.get("impact") == "high":
-                currency = event.get("currency", "")
-                event_time = event.get("time", "")
-                cache_key = f"news:high_impact:{currency}"
-                await redis.set(cache_key, f"{event['title']} at {event_time}", ex=3600)
+                events = resp.json()
 
-        await redis.close()
+            now_utc = datetime.now(timezone.utc)
+
+            for event in events:
+                if event.get("impact") != "High":
+                    continue
+
+                country  = event.get("country", "")
+                title    = event.get("title", "Unknown event")
+                raw_date = event.get("date", "")
+                raw_time = event.get("time", "")
+
+                # Parse event datetime (ForexFactory uses format "MM-DD-YYYY" + "HH:MMam/pm")
+                try:
+                    event_dt_str = f"{raw_date} {raw_time}"
+                    event_dt = datetime.strptime(event_dt_str, "%m-%d-%Y %I:%M%p").replace(
+                        tzinfo=timezone.utc
+                    )
+                except Exception:
+                    continue
+
+                # Only cache events within the next 30 minutes or past 5 minutes
+                minutes_until = (event_dt - now_utc).total_seconds() / 60
+                if -5 <= minutes_until <= 30:
+                    cache_key = f"news:high_impact:{country}"
+                    ttl = max(60, int((event_dt - now_utc + timedelta(minutes=5)).total_seconds()))
+                    await redis.set(
+                        cache_key,
+                        f"{title} at {raw_time} UTC",
+                        ex=ttl,
+                    )
+                    logger.info("celery.calendar_cached", country=country, title=title,
+                                minutes_until=round(minutes_until, 1))
+
+        except Exception as e:
+            logger.error("celery.calendar_error", error=str(e))
+        finally:
+            await redis.close()
 
     run_async(_run())
 
@@ -364,12 +433,7 @@ def collect_economic_calendar():
 def sync_open_trades():
     """Sync current price and unrealized P&L for all open trades."""
     async def _run():
-        from sqlalchemy import text
-        from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-        from sqlalchemy.orm import sessionmaker
-
-        db_engine = create_async_engine(settings.DATABASE_URL)
-        Session = sessionmaker(db_engine, class_=AsyncSession, expire_on_commit=False)
+        _, Session = _get_celery_db()   # FIX #14: shared engine
 
         async with Session() as session:
             result = await session.execute(
@@ -377,26 +441,38 @@ def sync_open_trades():
             )
             open_trades = result.mappings().all()
 
-        for trade in open_trades:
-            try:
-                async with httpx.AsyncClient() as client:
-                    resp = await client.get(f"{settings.MARKET_DATA_URL}/market/price/{trade['symbol']}")
-                    if resp.status_code == 200:
-                        current_price = resp.json().get("price", 0)
-                        entry = float(trade["entry_price"] or 0)
-                        direction_mult = 1 if trade["direction"] == "BUY" else -1
-                        unrealized_pnl = (current_price - entry) * direction_mult * float(trade["lot_size"] or 1) * 100000
+        if not open_trades:
+            return
 
-                        async with Session() as session:
-                            await session.execute(
-                                text("UPDATE trades SET current_price = :price, unrealized_pnl = :pnl WHERE id = :id"),
-                                {"price": current_price, "pnl": unrealized_pnl, "id": str(trade["id"])},
-                            )
-                            await session.commit()
-            except Exception as e:
-                logger.error("sync_trades.failed", trade_id=str(trade["id"]), error=str(e))
+        # FIX #13: create ONE httpx client for all trades, not one per trade
+        async with httpx.AsyncClient(timeout=10) as client:
+            for trade in open_trades:
+                try:
+                    resp = await client.get(
+                        f"{settings.MARKET_DATA_URL}/market/price/{trade['symbol']}"
+                    )
+                    if resp.status_code != 200:
+                        continue
 
-        await db_engine.dispose()
+                    current_price = resp.json().get("price", 0)
+                    entry         = float(trade["entry_price"] or 0)
+                    direction_mult = 1 if trade["direction"] == "BUY" else -1
+                    unrealized_pnl = (
+                        (current_price - entry)
+                        * direction_mult
+                        * float(trade["lot_size"] or 1)
+                        * 100000
+                    )
+
+                    async with Session() as upd_session:
+                        await upd_session.execute(
+                            text("UPDATE trades SET current_price = :price, unrealized_pnl = :pnl WHERE id = :id"),
+                            {"price": current_price, "pnl": unrealized_pnl, "id": str(trade["id"])},
+                        )
+                        await upd_session.commit()
+
+                except Exception as e:
+                    logger.error("sync_trades.failed", trade_id=str(trade["id"]), error=str(e))
 
     run_async(_run())
 
@@ -407,12 +483,7 @@ def sync_open_trades():
 def cleanup_expired_signals():
     """Mark signals older than 24h (untouched) as inactive."""
     async def _run():
-        from sqlalchemy import text
-        from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-        from sqlalchemy.orm import sessionmaker
-
-        db_engine = create_async_engine(settings.DATABASE_URL)
-        Session = sessionmaker(db_engine, class_=AsyncSession, expire_on_commit=False)
+        _, Session = _get_celery_db()   # FIX #14: shared engine
 
         async with Session() as session:
             result = await session.execute(text("""
@@ -423,7 +494,5 @@ def cleanup_expired_signals():
             """))
             await session.commit()
             logger.info("cleanup.signals", deactivated=result.rowcount)
-
-        await db_engine.dispose()
 
     run_async(_run())

@@ -194,13 +194,6 @@ GET  /api/users/accounts            List all accounts
 
 ---
 
-## Documentation
-- `PRIVACY_POLICY.md` — Privacy Policy for user data collection and platform use.
-- `TERMS_OF_SERVICE.md` — Terms governing platform access, account use, and liability.
-- `AI_REFERENCE.md` — AI architecture, signal workflow, and risk engine guidance.
-
----
-
 ## Security
 
 - **AES-256-GCM** encryption for all broker credentials (stored as BYTEA)

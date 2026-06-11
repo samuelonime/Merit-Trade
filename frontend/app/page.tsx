@@ -2,7 +2,6 @@
 
 import { useState, useEffect } from "react";
 import Link from "next/link";
-import Logo from "@/components/Logo";
 
 // ── Animated counter hook ──────────────────────────────────────────
 function useCounter(target: number, duration = 2000, start = false) {
@@ -150,7 +149,7 @@ function Nav() {
     <nav className={`nav${scrolled ? " nav--scrolled" : ""}`}>
       <div className="nav__inner">
         <div className="nav__brand">
-          <Logo href="/" showText={false} size={32} className="brand-icon" />
+          <span className="brand-icon">◈</span>
           <span className="brand-name">Merit<span>Trade</span> AI</span>
         </div>
         <div className="nav__links">
@@ -199,11 +198,6 @@ function Hero() {
         <div className="hero__actions">
           <Link href="/register" className="btn btn--hero">Start trading free →</Link>
           <Link href="/dashboard" className="btn btn--outline">View live dashboard</Link>
-        </div>
-        <div className="hero__links">
-          <Link href="/ai-reference" className="btn btn--outline">AI Reference</Link>
-          <Link href="/privacy-policy" className="btn btn--ghost">Privacy Policy</Link>
-          <Link href="/terms-of-service" className="btn btn--ghost">Terms of Service</Link>
         </div>
         <div className="hero__stats">
           <div className="hero__stat">
@@ -456,13 +450,14 @@ function Footer() {
     <footer className="footer">
       <div className="footer__inner">
         <div className="footer__brand">
-          <Logo href="/" showText={false} size={24} className="brand-icon" />
+          <span className="brand-icon">◈</span>
           <span className="brand-name">Merit<span>Trade</span> AI</span>
         </div>
         <div className="footer__links">
-          <Link href="/ai-reference">AI Reference</Link>
-          <Link href="/privacy-policy">Privacy Policy</Link>
-          <Link href="/terms-of-service">Terms of Service</Link>
+          <a href="#">Documentation</a>
+          <a href="#">API Reference</a>
+          <a href="#">Privacy Policy</a>
+          <a href="#">Terms of Service</a>
         </div>
         <p className="footer__copy">© {new Date().getFullYear()} Merit-Trade AI. All rights reserved. Proprietary.</p>
       </div>
@@ -523,15 +518,6 @@ export default function LandingPage() {
         .btn--primary:hover { background: #90cdf4; border-color: #90cdf4; }
         .btn--outline { border: 1px solid rgba(99,179,237,0.4); color: #63b3ed; background: transparent; }
         .btn--outline:hover { background: rgba(99,179,237,0.08); }
-        .hero__links {
-          display: flex;
-          flex-wrap: wrap;
-          justify-content: center;
-          gap: 0.85rem;
-          margin: 1rem auto 0;
-          max-width: 560px;
-        }
-        .hero__links .btn { min-width: 150px; justify-content: center; }
         .btn--hero {
           background: #63b3ed; color: #0a1628; border: none;
           padding: 0.9rem 2rem; font-size: 1rem; border-radius: 10px;
